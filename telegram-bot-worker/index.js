@@ -1,21 +1,8 @@
 import { Router } from 'itty-router'
+import { Client } from '@notionhq/client'
 
 // Create a new router
 const router = Router()
-
-/*
-Our index route, a simple hello world.
-*/
-router.get("/dailyjournal/", () => {
-  return new Response("Hello, world! This is the dailyjournal page of your Worker template.")
-})
-
-router.post("/", async request => {
-  console.log("Received POST request on /");
-  let data = await request.json();
-  console.log(data);
-  return new Response('ok', {status: 200})
-})
 
 /*
 Telegram Webhook handler function
@@ -67,42 +54,32 @@ router.get('/dailyjournal/oauth2', async request => {
 
     const response = await fetch(NOTION_API_BASE_URL + '/oauth/token', init);
     const data = await response.json();
-    tg_user_id = atob(query["state"])
+    const tg_user_id = atob(query["state"])
 
     // Store Notion access key and other details against Telegram User ID
-    await TG_NOTION_MAP.put(tg_user_id, data)
+    await TG_NOTION_MAP.put(tg_user_id, JSON.stringify(data))
   }
   return new Response('Access Granted. Please close the window.', {status: 200})
 })
 
-/*
-This is the last route we define, it will match anything that hasn't hit a route we've defined
-above, therefore it's useful as a 404 (and avoids us hitting worker exceptions, so make sure to include it!).
-
-Visit any page that doesn't exist (e.g. /foobar) to see it in action.
-*/
-router.all("*", () => new Response("404, not found!", { status: 404 }))
-
-/*
-This snippet ties our worker to the router we deifned above, all incoming requests
-are passed to the router where your routes are called and the response is sent.
-*/
-addEventListener('fetch', (e) => {
-  e.respondWith(router.handle(e.request))
-})
 
 /*
 Handle the event scheduled via Cron
 */
 async function triggerEvent(event) {
-  // Fetch some data
-  console.log("cron processed", event.cron, event.type, event.scheduledTime);
+  // console.log("cron processed", event.cron, event.type, event.scheduledTime);
+  // list all Telegram chat user ids
+  const value = await TG_NOTION_MAP.list()
+  value.keys.forEach(val => {
+    const chat_user_id = val["name"]
+    console.log(chat_user_id)
+    // Send a reminder in each Telegram conversation - "How was your Day?"
+    tg(TG_BOT_TOKEN,'sendmessage',{
+      chat_id: chat_user_id,
+      text: 'How was your day?'
+    })
+  });
 }
-
-
-addEventListener("scheduled", event => {
-  event.waitUntil(triggerEvent(event))
-})
 
 /*
 Telegram Functions
@@ -139,14 +116,17 @@ async function handlemessage(fields) {
     } else {
       // This is not a command.
       // Persist this to Notion provided access was granted.
-      const value = await TG_NOTION_MAP.get(from_id)
-      if (value === null) {
+      const notion_details = await TG_NOTION_MAP.get(from_id)
+      if (notion_details === null) {
+        console.log("Notion details unavailable. Please login to Notion again.")
         await tg(TG_BOT_TOKEN,'sendmessage',{
           chat_id: chat_id,
           text: 'Please allow access to Notion using /notion command'
         })
       } else {
-        
+        const notion_details_o = JSON.parse(notion_details)
+        console.log(notion_details_o);
+        await notion(notion_details_o["access_token"])
       }
     }
   }
@@ -174,3 +154,34 @@ async function tg(token, type, data, n = true) {
       return e
   }
 }
+
+async function notion(token, type, data) {
+  // Initializing a client
+  const notion = new Client({
+    auth: token,
+  })
+  if (type == 'retrieve_page') {
+    let response = await notion.pages.retrieve()
+    console.log(response)
+  }
+}
+
+/*
+This is the last route we define, it will match anything that hasn't hit a route we've defined
+above, therefore it's useful as a 404 (and avoids us hitting worker exceptions, so make sure to include it!).
+
+Visit any page that doesn't exist (e.g. /foobar) to see it in action.
+*/
+router.all("*", () => new Response("404, not found!", { status: 404 }))
+
+/*
+This snippet ties our worker to the router we deifned above, all incoming requests
+are passed to the router where your routes are called and the response is sent.
+*/
+addEventListener('fetch', (e) => {
+  e.respondWith(router.handle(e.request))
+})
+
+addEventListener("scheduled", event => {
+  event.waitUntil(triggerEvent(event))
+})
