@@ -13,15 +13,9 @@ router.post("/dailyjournal/tg", async request => {
     "asn": request.cf.asn,
     "colo": request.cf.colo
   }
-  
-  // If the POST data is JSON then attach it to our response.
-  // TODO: below comparison fails for some reason
-  //if (request.headers.get("content-type") === "application/json") {
-    fields["json"] = await request.json()
-    console.log(fields["json"])
-    await handlemessage(fields)
-  //}
-
+  fields["json"] = await request.json()
+  console.log(fields["json"])
+  await handlemessage(fields)
   return new Response('ok', {status: 200})
 })
 
@@ -49,13 +43,22 @@ router.get('/dailyjournal/oauth2', async request => {
         "Content-Type": "application/json;charset=UTF-8",
       },
     };
-    console.log(init.body);
-    console.log(init.headers);
 
     const response = await fetch(NOTION_API_BASE_URL + '/oauth/token', init);
     const data = await response.json();
     const tg_user_id = atob(query["state"])
 
+    let parent_page_id = await notion_get_parent_page_id(data["access_token"])
+    if (parent_page_id === null) {
+      await tg(TG_BOT_TOKEN,'sendmessage',{
+        chat_id: chat_id,
+        text: 'Parent page with title ' + NOTION_PARENT_PAGE_TITLE + ' does not exist on Notion. ' +
+              'Please create a page then provide access to it using /notion.',
+        parse_mode: 'html'
+      })
+    } else {
+      data["parent_page_id"] = parent_page_id
+    }
     // Store Notion access key and other details against Telegram User ID
     await TG_NOTION_MAP.put(tg_user_id, JSON.stringify(data))
   }
@@ -73,7 +76,7 @@ async function triggerEvent(event) {
   value.keys.forEach(val => {
     const chat_user_id = val["name"]
     console.log(chat_user_id)
-    // Send a reminder in each Telegram conversation - "How was your Day?"
+    // Send a reminder in each Telegram conversation - "How was your day?"
     tg(TG_BOT_TOKEN,'sendmessage',{
       chat_id: chat_user_id,
       text: 'How was your day?'
@@ -103,13 +106,15 @@ async function handlemessage(fields) {
                 })
                 break
             case 'notion':
+                const notion_login_url = NOTION_API_BASE_URL + '/oauth/authorize?owner=user&' + 
+                'client_id=' + NOTION_CLIENT_ID + '&' + 
+                'state=' + btoa(from_id) + '&' +
+                'redirect_uri=https://digpi.com/dailyjournal/oauth2&response_type=code';
+
                 await tg(TG_BOT_TOKEN,'sendmessage',{
                     chat_id: chat_id,
-                    text: 'Please click the link and allow access ' +
-                    NOTION_API_BASE_URL + '/oauth/authorize?owner=user&' + 
-                    'client_id=' + NOTION_CLIENT_ID + '&' + 
-                    'state=' + btoa(from_id) + '&' +
-                    'redirect_uri=https://digpi.com/dailyjournal/oauth2&response_type=code">'
+                    text: 'Please <a href="' + notion_login_url + '">click here</a> and allow access to the parent page in Notion',
+                    parse_mode: 'html'
                 })
                 break
         }
@@ -118,15 +123,15 @@ async function handlemessage(fields) {
       // Persist this to Notion provided access was granted.
       const notion_details = await TG_NOTION_MAP.get(from_id)
       if (notion_details === null) {
-        console.log("Notion details unavailable. Please login to Notion again.")
         await tg(TG_BOT_TOKEN,'sendmessage',{
           chat_id: chat_id,
-          text: 'Please allow access to Notion using /notion command'
+          text: 'Please allow access to Notion\'s parent page using /notion command'
         })
       } else {
         const notion_details_o = JSON.parse(notion_details)
         console.log(notion_details_o);
-        await notion(notion_details_o["access_token"])
+        let response = await notion_create_page(notion_details_o["access_token"], notion_details_o["parent_page_id"], text)
+        console.log(response)
       }
     }
   }
@@ -134,7 +139,7 @@ async function handlemessage(fields) {
 
 async function tg(token, type, data, n = true) {
   try {
-      let t = await fetch('https://api.telegram.org/bot' + token + '/' + type,{
+      let t = await fetch('https://api.telegram.org/bot' + token + '/' + type, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -155,15 +160,42 @@ async function tg(token, type, data, n = true) {
   }
 }
 
-async function notion(token, type, data) {
-  // Initializing a client
-  const notion = new Client({
-    auth: token,
+async function notion_get_parent_page_id(token) {
+  console.log("Called Get Parent Page", token)
+  const notion = new Client({auth: token})
+  let response = await notion.search({
+    query: NOTION_PARENT_PAGE_TITLE,
   })
-  if (type == 'retrieve_page') {
-    let response = await notion.pages.retrieve()
-    console.log(response)
+  console.log(response)
+  if (response.results.length == 0) {
+    return null
+  } else {
+    return response.results[0].id
   }
+}
+
+async function notion_create_page(token, parent_page_id, title) {
+  console.log("Called Create Page", token, parent_page_id, title)
+  const notion = new Client({auth: token})
+  const body = {
+    parent: {
+        page_id: parent_page_id
+    },
+    properties: {
+            title: {
+                title: [
+                {
+                    type: "text",
+                    text: {
+                      content: title
+                    }
+                }
+                ]
+            }
+    }
+  }
+  let response = await notion.pages.create(body)
+  return response
 }
 
 /*
